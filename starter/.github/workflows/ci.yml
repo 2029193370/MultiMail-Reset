@@ -1,0 +1,26 @@
+name: CI & Security Scan
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: 2029193370/ci-templates/.github/workflows/reusable-ci.yml@main
+    # with:
+      # 按项目需要取消注释并修改版本，不需要的参数保持注释即可
+      # node-version: '22'       # Node.js / TypeScript / Next.js
+      # java-version: '17'       # Java (Maven / Gradle)
+      # php-version: '8.2'       # PHP / Laravel
+      # python-version: '3.11'   # Python / Django
+      # go-version: '1.22'       # Go
+      # dotnet-version: '8.0'    # .NET / C#

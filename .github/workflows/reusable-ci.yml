@@ -1,0 +1,367 @@
+# ============================================================
+# 可复用工作流 (Reusable Workflow)
+# 仓库：2029193370/ci-templates
+# 路径：.github/workflows/reusable-ci.yml
+#
+# 其他项目通过以下方式调用此工作流：
+#   uses: 2029193370/ci-templates/.github/workflows/reusable-ci.yml@main
+#
+# 流水线结构：
+#   Layer 0 — 仓库卫生检查 (编译产物 / 冲突标记 / 敏感文件 / 大文件)
+#   Layer 1 — 代码质量检查 (Lint & Build)
+#   Layer 2 — 安全漏洞与密钥泄露扫描 (Trivy)
+#
+# 执行策略：所有检查全部执行完毕后统一报告，不会中途停止
+# 支持语言：Node.js/TS · Java · PHP · Python · Go · .NET · Docker
+# ============================================================
+
+name: Reusable CI & Security
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node.js 版本'
+        required: false
+        type: string
+        default: '22'
+      java-version:
+        description: 'Java 版本 (LTS: 17 / 21)'
+        required: false
+        type: string
+        default: '17'
+      php-version:
+        description: 'PHP 版本'
+        required: false
+        type: string
+        default: '8.2'
+      python-version:
+        description: 'Python 版本'
+        required: false
+        type: string
+        default: '3.11'
+      go-version:
+        description: 'Go 版本'
+        required: false
+        type: string
+        default: '1.22'
+      dotnet-version:
+        description: '.NET SDK 版本'
+        required: false
+        type: string
+        default: '8.0'
+      trivy-severity:
+        description: 'Trivy 扫描严重程度阈值'
+        required: false
+        type: string
+        default: 'CRITICAL,HIGH'
+
+permissions:
+  contents: read
+
+jobs:
+  # ==========================================
+  # Layer 0: 仓库卫生检查（全量执行，不中断）
+  # ==========================================
+  repo-hygiene:
+    name: Layer 0 - Repo Hygiene Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Repo Hygiene Check
+        run: |
+          errors=0
+          warnings=0
+
+          echo "========== 编译产物检查 =========="
+          for dir in node_modules __pycache__ .next .nuxt .gradle .pytest_cache; do
+            if [ -d "$dir" ]; then
+              echo "::error::不应提交的目录: $dir/ — 请添加到 .gitignore 并运行 git rm -r --cached $dir"
+              errors=$((errors + 1))
+            fi
+          done
+
+          if find . -maxdepth 4 -name "*.pyc" -not -path "./node_modules/*" -print -quit 2>/dev/null | grep -q .; then
+            echo "::error::检测到 Python 编译文件 (*.pyc) — 请将 *.pyc 和 __pycache__/ 添加到 .gitignore"
+            errors=$((errors + 1))
+          fi
+
+          if find . -maxdepth 4 -name "*.class" -not -path "./node_modules/*" -print -quit 2>/dev/null | grep -q .; then
+            echo "::error::检测到 Java 编译文件 (*.class) — 请将 *.class 添加到 .gitignore"
+            errors=$((errors + 1))
+          fi
+
+          echo ""
+          echo "========== 合并冲突标记检查 =========="
+          conflicts=$(git grep -rn '<<<<<<< \|>>>>>>> ' -- ':!*.lock' ':!*.min.*' 2>/dev/null || true)
+          if [ -n "$conflicts" ]; then
+            echo "$conflicts" | head -20
+            echo "::error::检测到未解决的合并冲突标记"
+            errors=$((errors + 1))
+          fi
+
+          echo ""
+          echo "========== 敏感文件检查 =========="
+          for envfile in .env .env.local .env.development .env.production; do
+            if [ -f "$envfile" ]; then
+              echo "::warning::检测到 $envfile — 可能包含敏感信息，建议添加到 .gitignore，使用 .env.example 提供模板"
+              warnings=$((warnings + 1))
+            fi
+          done
+
+          if find . -maxdepth 3 \( -name "*.pem" -o -name "*.key" -o -name "*.p12" -o -name "*.pfx" \) -not -path './.git/*' 2>/dev/null | head -1 | grep -q .; then
+            echo "::warning::检测到证书/私钥文件 — 请确认是否应提交到仓库"
+            warnings=$((warnings + 1))
+          fi
+
+          echo ""
+          echo "========== 大文件检查 =========="
+          large_files=$(find . -not -path './.git/*' -not -path './node_modules/*' -not -path './vendor/*' -type f -size +5M 2>/dev/null || true)
+          if [ -n "$large_files" ]; then
+            echo "::warning::检测到超过 5MB 的大文件，建议使用 Git LFS 管理："
+            echo "$large_files" | while IFS= read -r f; do
+              size=$(du -h "$f" | cut -f1)
+              echo "  $size  $f"
+            done
+            warnings=$((warnings + 1))
+          fi
+
+          echo ""
+          echo "=========================================="
+          echo "检查结果: ${errors} 个错误, ${warnings} 条警告"
+          echo "=========================================="
+
+          if [ $errors -gt 0 ]; then
+            echo ""
+            echo "请按以下步骤修复:"
+            echo "  1. 将上述文件/目录添加到 .gitignore"
+            echo "  2. 运行 git rm -r --cached <文件/目录> 移除已跟踪的文件"
+            echo "  3. 重新 commit 并推送"
+            exit 1
+          fi
+
+  # ==========================================
+  # Layer 1: 代码质量检查（全量执行，不中断）
+  # ==========================================
+  lint-and-build:
+    name: Layer 1 - Lint & Build Check
+    runs-on: ubuntu-latest
+    needs: repo-hygiene
+    if: ${{ !cancelled() }}
+    timeout-minutes: 20
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      # ── Node.js / TypeScript / Next.js / React ─
+      - name: Setup Node.js
+        id: setup-node
+        if: hashFiles('package.json') != ''
+        uses: actions/setup-node@v4
+        continue-on-error: true
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'npm'
+
+      - name: Node.js — Install, Lint & Build
+        id: check-node
+        if: hashFiles('package.json') != '' && steps.setup-node.outcome == 'success'
+        continue-on-error: true
+        run: |
+          npm ci || { echo "::error::Node.js 依赖安装失败，请检查 package-lock.json 是否与 package.json 同步"; exit 1; }
+
+          failed=0
+          npm run lint --if-present || { echo "::error::Node.js Lint 检查未通过"; failed=1; }
+          npm run build --if-present || { echo "::error::Node.js Build 构建失败"; failed=1; }
+          exit $failed
+
+      # ── Java (Maven / Gradle) ──────────────────
+      - name: Setup Java
+        id: setup-java
+        if: hashFiles('pom.xml') != '' || hashFiles('build.gradle') != '' || hashFiles('build.gradle.kts') != ''
+        uses: actions/setup-java@v4
+        continue-on-error: true
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: 'temurin'
+          cache: ${{ hashFiles('pom.xml') != '' && 'maven' || 'gradle' }}
+
+      - name: Java (Maven) — Compile
+        id: check-maven
+        if: hashFiles('pom.xml') != '' && steps.setup-java.outcome == 'success'
+        continue-on-error: true
+        run: |
+          if [ -f "mvnw" ]; then
+            chmod +x mvnw
+            ./mvnw -B compile
+          else
+            mvn -B compile
+          fi
+
+      - name: Java (Gradle) — Assemble
+        id: check-gradle
+        if: hashFiles('pom.xml') == '' && (hashFiles('build.gradle') != '' || hashFiles('build.gradle.kts') != '') && steps.setup-java.outcome == 'success'
+        continue-on-error: true
+        run: |
+          if [ -f "gradlew" ]; then
+            chmod +x gradlew
+            ./gradlew assemble --no-daemon
+          else
+            gradle assemble --no-daemon
+          fi
+
+      # ── PHP ────────────────────────────────────
+      - name: Setup PHP
+        id: setup-php
+        if: hashFiles('composer.json') != '' || hashFiles('**/*.php') != ''
+        uses: shivammathur/setup-php@v2
+        continue-on-error: true
+        with:
+          php-version: ${{ inputs.php-version }}
+          tools: composer:v2
+
+      - name: Cache Composer Dependencies
+        if: hashFiles('composer.lock') != '' && steps.setup-php.outcome == 'success'
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: composer-${{ runner.os }}-php${{ inputs.php-version }}-${{ hashFiles('composer.lock') }}
+          restore-keys: |
+            composer-${{ runner.os }}-php${{ inputs.php-version }}-
+
+      - name: PHP — Install & Syntax Check
+        id: check-php
+        if: (hashFiles('composer.json') != '' || hashFiles('**/*.php') != '') && steps.setup-php.outcome == 'success'
+        continue-on-error: true
+        run: |
+          failed=0
+
+          if [ -f "composer.json" ]; then
+            composer install --no-interaction --prefer-dist --optimize-autoloader || { echo "::error::Composer 依赖安装失败"; failed=1; }
+          fi
+
+          find . -name "*.php" -not -path "./vendor/*" -not -path "./node_modules/*" -print0 2>/dev/null \
+            | xargs -0 -r -P$(nproc) -n1 php -l || { echo "::error::PHP 语法检查未通过"; failed=1; }
+
+          exit $failed
+
+      # ── Python ─────────────────────────────────
+      - name: Setup Python
+        id: setup-python
+        if: hashFiles('requirements.txt') != '' || hashFiles('Pipfile') != '' || hashFiles('pyproject.toml') != ''
+        uses: actions/setup-python@v5
+        continue-on-error: true
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: 'pip'
+
+      - name: Python — Flake8 Lint
+        id: check-python
+        if: (hashFiles('requirements.txt') != '' || hashFiles('Pipfile') != '' || hashFiles('pyproject.toml') != '') && steps.setup-python.outcome == 'success'
+        continue-on-error: true
+        run: |
+          pip install flake8 || { echo "::error::Flake8 安装失败"; exit 1; }
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+
+      # ── Go ──────────────────────────────────────
+      - name: Setup Go
+        id: setup-go
+        if: hashFiles('go.mod') != ''
+        uses: actions/setup-go@v5
+        continue-on-error: true
+        with:
+          go-version: ${{ inputs.go-version }}
+
+      - name: Go — Vet & Build
+        id: check-go
+        if: hashFiles('go.mod') != '' && steps.setup-go.outcome == 'success'
+        continue-on-error: true
+        run: |
+          failed=0
+          go vet ./... || { echo "::error::Go vet 静态分析未通过"; failed=1; }
+          go build ./... || { echo "::error::Go build 构建失败"; failed=1; }
+          exit $failed
+
+      # ── .NET (C#) ──────────────────────────────
+      - name: Setup .NET
+        id: setup-dotnet
+        if: hashFiles('**/*.csproj') != '' || hashFiles('**/*.sln') != ''
+        uses: actions/setup-dotnet@v4
+        continue-on-error: true
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+
+      - name: .NET — Restore & Build
+        id: check-dotnet
+        if: (hashFiles('**/*.csproj') != '' || hashFiles('**/*.sln') != '') && steps.setup-dotnet.outcome == 'success'
+        continue-on-error: true
+        run: |
+          dotnet restore || { echo "::error::.NET 依赖还原失败"; exit 1; }
+          dotnet build --no-restore || { echo "::error::.NET 构建失败"; exit 1; }
+
+      # ── Dockerfile ─────────────────────────────
+      - name: Lint Dockerfiles (Hadolint)
+        id: check-docker
+        if: hashFiles('**/Dockerfile') != ''
+        uses: hadolint/hadolint-action@v3.1.0
+        continue-on-error: true
+        with:
+          recursive: true
+          failure-threshold: warning
+
+      # ── 汇总 ───────────────────────────────────
+      - name: Layer 1 — Check Results
+        if: ${{ !cancelled() }}
+        run: |
+          echo "=== Layer 1 检查结果汇总 ==="
+          failed=""
+
+          [ "${{ steps.setup-node.outcome }}" = "failure" ] && failed="${failed}  - Node.js 环境安装失败\n"
+          [ "${{ steps.check-node.outcome }}" = "failure" ] && failed="${failed}  - Node.js 检查未通过\n"
+          [ "${{ steps.setup-java.outcome }}" = "failure" ] && failed="${failed}  - Java 环境安装失败\n"
+          [ "${{ steps.check-maven.outcome }}" = "failure" ] && failed="${failed}  - Java (Maven) 编译失败\n"
+          [ "${{ steps.check-gradle.outcome }}" = "failure" ] && failed="${failed}  - Java (Gradle) 编译失败\n"
+          [ "${{ steps.setup-php.outcome }}" = "failure" ] && failed="${failed}  - PHP 环境安装失败\n"
+          [ "${{ steps.check-php.outcome }}" = "failure" ] && failed="${failed}  - PHP 检查未通过\n"
+          [ "${{ steps.setup-python.outcome }}" = "failure" ] && failed="${failed}  - Python 环境安装失败\n"
+          [ "${{ steps.check-python.outcome }}" = "failure" ] && failed="${failed}  - Python Lint 未通过\n"
+          [ "${{ steps.setup-go.outcome }}" = "failure" ] && failed="${failed}  - Go 环境安装失败\n"
+          [ "${{ steps.check-go.outcome }}" = "failure" ] && failed="${failed}  - Go 检查未通过\n"
+          [ "${{ steps.setup-dotnet.outcome }}" = "failure" ] && failed="${failed}  - .NET 环境安装失败\n"
+          [ "${{ steps.check-dotnet.outcome }}" = "failure" ] && failed="${failed}  - .NET 构建失败\n"
+          [ "${{ steps.check-docker.outcome }}" = "failure" ] && failed="${failed}  - Dockerfile 检查未通过\n"
+
+          if [ -n "$failed" ]; then
+            printf "\n以下检查未通过:\n%b\n" "$failed"
+            echo "请展开上方对应步骤查看详细错误日志"
+            echo "::error::Layer 1 存在未通过的检查项，请修复后重新提交"
+            exit 1
+          fi
+
+          echo "所有代码检查通过"
+
+  # ==========================================
+  # Layer 2: 安全漏洞与密钥泄露扫描
+  # ==========================================
+  security-scan:
+    name: Layer 2 - Security & Secret Scan
+    runs-on: ubuntu-latest
+    needs: lint-and-build
+    if: ${{ !cancelled() }}
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy Vulnerability Scanner
+        uses: aquasecurity/trivy-action@v0.34.0
+        with:
+          scan-type: 'fs'
+          scanners: 'vuln,secret'
+          ignore-unfixed: true
+          format: 'table'
+          severity: ${{ inputs.trivy-severity }}
+          exit-code: '1'
