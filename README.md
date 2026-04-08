@@ -1,89 +1,61 @@
-# ci-templates
+# MailGuard - 个人邮箱自动改密码系统
 
-企业通用 CI 工作流模板，自动检测项目语言并执行对应的质量检查与安全扫描。
+周期性自动修改个人邮箱密码，确保账号安全。
 
-## 支持的技术栈
+## 功能
 
-| 技术栈 | 检测文件 | 执行内容 |
-|--------|----------|----------|
-| Node.js / TypeScript / Next.js / React | `package.json` | `npm ci` → `npm run lint` → `npm run build` |
-| Java (Maven) | `pom.xml` | `mvn -B compile`（自动识别 Maven Wrapper） |
-| Java (Gradle) | `build.gradle` / `build.gradle.kts` | `gradle assemble`（自动识别 Gradle Wrapper） |
-| PHP / Laravel | `composer.json` / `*.php` | `composer install` → `php -l` 语法检查 |
-| Python / Django / FastAPI | `requirements.txt` / `Pipfile` / `pyproject.toml` | Flake8 致命错误检查 |
-| Go | `go.mod` | `go vet` → `go build` |
-| .NET / C# | `*.csproj` / `*.sln` | `dotnet restore` → `dotnet build` |
-| Docker | `Dockerfile` | Hadolint 最佳实践与安全检查 |
+- **多邮箱管理**：支持 QQ邮箱、网易邮箱(163/126)、Outlook/Hotmail、Gmail
+- **自动改密**：通过浏览器自动化 (Playwright) 尝试自动修改密码
+- **混合模式**：自动化失败时（验证码/2FA），降级为手动模式并提供指引
+- **定时调度**：按设定周期（如每30天）自动触发改密
+- **密码生成**：内置强密码生成器，支持自定义规则
+- **加密存储**：所有密码使用 Fernet 对称加密存储
+- **变更历史**：完整记录每次密码变更的详情
 
-## 流水线结构
+## 技术栈
 
-| Layer | 内容 | 说明 |
-|-------|------|------|
-| Layer 0 | 仓库卫生检查 | 编译产物、合并冲突标记、敏感文件（`.env`/私钥）、大文件检测 |
-| Layer 1 | Lint & Build 检查 | 根据项目文件自动检测语言，执行对应的语法检查和编译 |
-| Layer 2 | Trivy 安全漏洞 & 密钥泄露扫描 | 同时扫描依赖漏洞和硬编码密钥 |
+| 层级 | 技术 |
+|------|------|
+| 前端 | React 19 + TypeScript + Ant Design 5 |
+| 后端 | FastAPI + SQLAlchemy 2 (async) |
+| 数据库 | SQLite（开发）/ PostgreSQL（生产） |
+| 自动化 | Playwright (Chromium) |
+| 调度 | APScheduler |
 
-> **执行策略**：所有 Layer 的所有检查项全量执行，不会因某项失败而跳过后续检查。开发者可在一次 CI 运行中看到全部问题，一次性修复。
+## 本地开发
 
----
+### 后端
 
-## 新项目接入（2 步）
-
-### 第 1 步：复制 starter 文件
-
-将 [`starter/.github/workflows/ci.yml`](./starter/.github/workflows/ci.yml) 复制到你的新项目，保持相同路径：
-
-```
-你的新项目/
-└── .github/
-    └── workflows/
-        └── ci.yml   ← 复制这个文件
+```bash
+cd backend
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+playwright install chromium
+cp .env.example .env
+uvicorn app.main:app --reload
 ```
 
-### 第 2 步：按需修改版本（可选）
+### 前端
 
-打开 `ci.yml`，取消注释并修改你需要的语言版本：
-
-```yaml
-jobs:
-  ci:
-    uses: 2029193370/ci-templates/.github/workflows/reusable-ci.yml@main
-    with:
-      node-version: '22'       # Node.js / TypeScript / Next.js
-      java-version: '17'       # Java (Maven / Gradle)
-      php-version: '8.2'       # PHP / Laravel
-      python-version: '3.11'   # Python / Django
-      go-version: '1.22'       # Go
-      dotnet-version: '8.0'    # .NET / C#
+```bash
+cd frontend
+npm install
+npm run dev
 ```
 
-**不需要传入的参数保持注释或删掉即可**，工作流会自动根据项目中存在的文件判断执行哪些检查。
+访问 http://localhost:5173，API 文档 http://localhost:8000/docs
 
----
+### Docker Compose
 
-## 升级维护
-
-只需修改本仓库的 `reusable-ci.yml`，所有接入项目**自动获得更新**，无需逐个修改。
-
----
-
-## 安全与性能特性
-
-- **全量执行不中断** — 所有检查项全部跑完再汇总报告，开发者一次看到所有问题，避免反复修复-推送
-- **最小权限原则** — 工作流仅声明 `contents: read`，限制 Token 作用范围
-- **并发控制** — 同一分支重复推送自动取消旧流水线，节省 Actions 分钟数
-- **仓库卫生检查** — 拦截编译产物、合并冲突标记、大文件（>5MB），警告 `.env`/私钥等敏感文件
-- **Dockerfile 规范** — 自动检测 Dockerfile 并用 Hadolint 检查安全与最佳实践
-- **超时保护** — 所有 Job 设置超时（Layer 0: 5min，Layer 1: 20min，Layer 2: 15min），防止挂起
-- **依赖缓存** — npm / Maven / Gradle / Composer / pip / Go modules 均启用缓存
-- **显式扫描器** — Trivy 同时启用 `vuln`（漏洞）+ `secret`（密钥泄露）扫描
-
----
-
-## 添加状态徽章
-
-在项目 README 顶部添加：
-
-```markdown
-![CI](https://github.com/<你的用户名>/<你的仓库>/actions/workflows/ci.yml/badge.svg)
+```bash
+docker compose up -d
 ```
+
+访问 http://localhost
+
+## 安全提示
+
+- 修改 `.env` 中的 `ENCRYPTION_KEY` 为强随机字符串
+- 本工具仅供个人本地使用，不要部署在公网
+- 密码以加密形式存储在数据库中
